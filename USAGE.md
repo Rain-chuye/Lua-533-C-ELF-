@@ -56,3 +56,13 @@ export LD_LIBRARY_PATH=./lua:
 
 ---
 **商业保护建议**: 为了达到最高安全级别，建议在源码中使用宏标记关键函数，并配合 `protector.py` 的虚拟化功能使用。
+
+## 5. Lua 调用示例 (Lua Integration Example)
+现在保护逻辑已集成进 Lua 模块，您可以直接在脚本中调用：
+
+```lua
+local vmp = require "vmp"
+-- 保护一个 64 位或 32 位的 .so 文件
+vmp.protect("original.so", "protected.so")
+print("二进制保护已完成")
+```
