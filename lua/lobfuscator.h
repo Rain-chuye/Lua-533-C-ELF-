@@ -65,6 +65,7 @@ static lua_Number encrypt_float_obf(lua_Number n) {
 
 /* Obfuscator functions */
 void obfuscate_proto(lua_State *L, Proto *f, int encrypt_strings);
+void lua_virtualize_native(lua_State *L, void *addr, size_t size);
 void lua_security_check(void);
 void lua_start_security_thread(void);
 
