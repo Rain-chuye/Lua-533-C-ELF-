@@ -13,79 +13,91 @@
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/time.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <errno.h>
 
-/* Simple ptrace check */
-static int check_ptrace() {
+/* Advanced Anti-Debugging */
+
+/* 1. Fork-based Anti-Debug (Child traces Parent) */
+static void anti_debug_fork() {
 #ifdef __linux__
-    if (ptrace(PTRACE_TRACEME, 0, 1, 0) < 0) {
-        return 1; // Being traced
+    pid_t child = fork();
+    if (child == 0) {
+        /* Child: try to trace parent */
+        pid_t parent = getppid();
+        if (ptrace(PTRACE_ATTACH, parent, 0, 0) < 0) {
+            /* Parent is already being traced! */
+            exit(1);
+        }
+        /* Keep parent traced */
+        waitpid(parent, NULL, 0);
+        while (1) {
+            if (ptrace(PTRACE_CONT, parent, 0, 0) < 0) break;
+            waitpid(parent, NULL, 0);
+        }
+        exit(0);
+    } else if (child < 0) {
+        exit(1); /* Fork failed, likely security restriction or heavy analysis */
     }
-    ptrace(PTRACE_DETACH, 0, 1, 0);
 #endif
-    return 0;
 }
 
-/* Check TracerPid in /proc/self/status */
+/* 2. Timing check to detect stepping */
+static long long get_time_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static void check_timing() {
+    long long start = get_time_ms();
+    /* Small dummy loop */
+    for (volatile int i = 0; i < 100000; i++);
+    long long end = get_time_ms();
+    if (end - start > 100) { /* Way too slow for 100k increments */
+        exit(0);
+    }
+}
+
+/* 3. Proc status check */
 static int check_tracer_pid() {
 #ifdef __linux__
     int fd = open("/proc/self/status", O_RDONLY);
     if (fd == -1) return 0;
-
     char buf[4096];
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
     close(fd);
     if (n <= 0) return 0;
     buf[n] = '\0';
-
     char *tracer_pid_str = strstr(buf, "TracerPid:");
     if (tracer_pid_str) {
         int pid = atoi(tracer_pid_str + 10);
-        if (pid != 0) return 1; // Being traced
+        if (pid != 0) return 1;
     }
-#endif
-    return 0;
-}
-
-/* Check for Frida strings in memory maps */
-static int check_frida() {
-#ifdef __linux__
-    int fd = open("/proc/self/maps", O_RDONLY);
-    if (fd == -1) return 0;
-
-    char buf[4096];
-    while (1) {
-        ssize_t n = read(fd, buf, sizeof(buf) - 1);
-        if (n <= 0) break;
-        buf[n] = '\0';
-        if (strstr(buf, "frida") || strstr(buf, "gum-js-loop") || strstr(buf, "gmain")) {
-            close(fd);
-            return 1;
-        }
-    }
-    close(fd);
 #endif
     return 0;
 }
 
 void lua_security_check(void) {
-    if (check_ptrace() || check_tracer_pid() || check_frida()) {
-        /* Anti-debug triggered */
-        exit(0);
-    }
+    if (check_tracer_pid()) exit(0);
+    check_timing();
 }
 
 static void *security_thread_func(void *arg) {
     (void)arg;
     while (1) {
         lua_security_check();
-        sleep(5);
+        sleep(2);
     }
     return NULL;
 }
 
 void lua_start_security_thread(void) {
+    unsetenv("LD_PRELOAD");
+    unsetenv("LD_AUDIT");
+    anti_debug_fork();
     pthread_t thread;
     if (pthread_create(&thread, NULL, security_thread_func, NULL) == 0) {
         pthread_detach(thread);
