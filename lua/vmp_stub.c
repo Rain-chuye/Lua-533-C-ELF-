@@ -2,24 +2,22 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/ptrace.h>
-#include <sys/wait.h>
-#include <openssl/evp.h>
+#include "laes.h"
 
-/* Runtime Anti-Debug Constructor */
+/* Advanced Commercial Anti-Debug Stub */
 __attribute__((constructor))
-void vmp_init() {
+void vmp_entry_check() {
 #ifdef __linux__
-    /* Advanced ptrace check */
+    /* Block tracers by being our own tracer or checking status */
     if (ptrace(PTRACE_TRACEME, 0, 1, 0) < 0) {
-        // Detected debugger
         _exit(0);
     }
-    ptrace(PTRACE_DETACH, 0, 1, 0);
 #endif
 
-    /* Decryption logic would go here:
-       1. Locate encrypted sections via Program Headers
-       2. Use AES-256-GCM to decrypt in-place
-       3. Memory protect (mprotect) to restore original permissions
+    /*
+    ** Runtime Decryption Logic (Conceptual for SO):
+    ** 1. Iterate over Program Headers to find PT_LOAD sections.
+    ** 2. Use internal AES-256-GCM (from laes.c) to decrypt marked blocks.
+    ** 3. Verify integrity via GCM Tag.
     */
 }

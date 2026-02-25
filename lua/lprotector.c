@@ -4,51 +4,25 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <time.h>
-#include <openssl/evp.h>
-#include <openssl/aes.h>
-#include <openssl/rand.h>
 #include "lua.h"
 #include "lauxlib.h"
 #include "lprotector.h"
+#include "laes.h"
 
-/* Secure random using /dev/urandom */
+/* Secure random using /dev/urandom syscall */
 static void get_secure_random(unsigned char *buf, size_t size) {
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd != -1) {
-        read(fd, buf, size);
+        ssize_t res = read(fd, buf, size);
+        (void)res;
         close(fd);
-    } else {
-        /* Fallback if /dev/urandom is missing */
-        for (size_t i = 0; i < size; i++) buf[i] = rand() & 0xFF;
     }
 }
 
-/* AES-256-GCM Encryption */
-static int aes_gcm_encrypt(unsigned char *plaintext, int plaintext_len,
-                           unsigned char *key, unsigned char *iv,
-                           unsigned char *ciphertext, unsigned char *tag) {
-    EVP_CIPHER_CTX *ctx;
-    int len;
-    int ciphertext_len;
+#define DECLARE_PROTECT_ELF_FINAL(bits) static void protect_elf##bits##_final(unsigned char *data, size_t size, unsigned char *key) {     Elf##bits##_Ehdr *ehdr = (Elf##bits##_Ehdr *)data;     if (ehdr->e_shoff == 0) return;     Elf##bits##_Shdr *shdr = (Elf##bits##_Shdr *)(data + ehdr->e_shoff);     char *shstrtab = (char *)(data + shdr[ehdr->e_shstrndx].sh_offset);         gcm_context gcm;     gcm_init(&gcm, key);     unsigned char iv[12];     unsigned char tag[16];     get_secure_random(iv, 12);         for (int i = 0; i < ehdr->e_shnum; i++) {         char *sname = shstrtab + shdr[i].sh_name;         if (strcmp(sname, ".rodata") == 0 || strcmp(sname, ".data") == 0) {             unsigned char *content = data + shdr[i].sh_offset;             unsigned char *ciphertext = malloc(shdr[i].sh_size);             gcm_encrypt(&gcm, iv, 12, content, shdr[i].sh_size, ciphertext, tag);             memcpy(content, ciphertext, shdr[i].sh_size);             free(ciphertext);         }         /* Commercial-level: Erase symbol tables */         if (shdr[i].sh_type == SHT_SYMTAB || shdr[i].sh_type == SHT_STRTAB) {              memset(data + shdr[i].sh_offset, 0, shdr[i].sh_size);         }         /* Mangle section names */         for (size_t j = 0; sname[j] != '\0'; j++) sname[j] = (char)('a' + (j % 26));     }     /* Destroy Section Header Table for analysis tools */     ehdr->e_shoff = 0;     ehdr->e_shnum = 0;     ehdr->e_shstrndx = 0; }
 
-    if(!(ctx = EVP_CIPHER_CTX_new())) return -1;
-    if(1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL)) return -1;
-    if(1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL)) return -1;
-    if(1 != EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv)) return -1;
-    if(1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len)) return -1;
-    ciphertext_len = len;
-    if(1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len)) return -1;
-    ciphertext_len += len;
-    if(1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag)) return -1;
-    EVP_CIPHER_CTX_free(ctx);
-    return ciphertext_len;
-}
-
-#define DECLARE_PROTECT_ELF_ULTIMATE(bits) static void protect_elf##bits##_ultimate(unsigned char *data, size_t size, unsigned char *key) {     Elf##bits##_Ehdr *ehdr = (Elf##bits##_Ehdr *)data;     if (ehdr->e_shoff == 0) return;     Elf##bits##_Shdr *shdr = (Elf##bits##_Shdr *)(data + ehdr->e_shoff);     char *shstrtab = (char *)(data + shdr[ehdr->e_shstrndx].sh_offset);         unsigned char iv[12];     unsigned char tag[16];     get_secure_random(iv, 12);         for (int i = 0; i < ehdr->e_shnum; i++) {         char *sname = shstrtab + shdr[i].sh_name;         if (strcmp(sname, ".rodata") == 0 || strcmp(sname, ".data") == 0) {             unsigned char *content = data + shdr[i].sh_offset;             unsigned char *ciphertext = malloc(shdr[i].sh_size);             if (aes_gcm_encrypt(content, shdr[i].sh_size, key, iv, ciphertext, tag) > 0) {                 memcpy(content, ciphertext, shdr[i].sh_size);                 /* Store IV and Tag in a hidden way - for demo, we append to section name */             }             free(ciphertext);         }         /* Symbol erasure */         if (shdr[i].sh_type == SHT_SYMTAB || shdr[i].sh_type == SHT_STRTAB) {              memset(data + shdr[i].sh_offset, 0, shdr[i].sh_size);         }     }     ehdr->e_shoff = 0; /* Destroy SHT */     ehdr->e_shnum = 0; }
-
-DECLARE_PROTECT_ELF_ULTIMATE(32)
-DECLARE_PROTECT_ELF_ULTIMATE(64)
+DECLARE_PROTECT_ELF_FINAL(32)
+DECLARE_PROTECT_ELF_FINAL(64)
 
 static int L_protect_binary(lua_State *L) {
     const char *input_path = luaL_checkstring(L, 1);
@@ -65,13 +39,15 @@ static int L_protect_binary(lua_State *L) {
     fseek(f, 0, SEEK_SET);
 
     unsigned char *data = (unsigned char *)malloc(size);
-    if (fread(data, 1, size, f) != size) { fclose(f); free(data); return 0; }
+    if (!data) { fclose(f); return 0; }
+    if (fread(data, 1, size, f) != size) { free(data); fclose(f); return 0; }
     fclose(f);
 
-    if (data[EI_CLASS] == ELFCLASS64) protect_elf64_ultimate(data, size, key);
-    else protect_elf32_ultimate(data, size, key);
+    if (data[EI_CLASS] == ELFCLASS64) protect_elf64_final(data, size, key);
+    else protect_elf32_final(data, size, key);
 
     FILE *out = fopen(output_path, "wb");
+    if (!out) { free(data); return 0; }
     fwrite(data, 1, size, out);
     fclose(out);
     free(data);
