@@ -1,0 +1,7 @@
+*.o
+*.a
+lua/lua
+lua/luac
+lua/liblua.a
+85+sha256.zip
+lobfuscator_old.c
