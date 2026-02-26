@@ -1,7 +1,8 @@
 #include "laes.h"
 #include <string.h>
 
-/* Simplified AES implementation for VMP */
+/* Robust AES implementation with alignment handling */
+
 static const uint8_t sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -31,7 +32,7 @@ static uint32_t rot_word(uint32_t w) {
 }
 
 int aes_setkey_encrypt(aes_context *ctx, const uint8_t *key, int keysize) {
-    int i, j;
+    int i;
     uint32_t temp;
     static const uint32_t rcon[10] = {
         0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000,
@@ -42,8 +43,8 @@ int aes_setkey_encrypt(aes_context *ctx, const uint8_t *key, int keysize) {
     ctx->nr = 14;
 
     for (i = 0; i < 8; i++) {
-        ctx->eK[i] = (key[i * 4] << 24) | (key[i * 4 + 1] << 16) |
-                     (key[i * 4 + 2] << 8) | key[i * 4 + 3];
+        ctx->eK[i] = ((uint32_t)key[i * 4] << 24) | ((uint32_t)key[i * 4 + 1] << 16) |
+                     ((uint32_t)key[i * 4 + 2] << 8) | (uint32_t)key[i * 4 + 3];
     }
 
     for (i = 8; i < 60; i++) {
@@ -86,7 +87,6 @@ void aes_encrypt(aes_context *ctx, const uint8_t *input, uint8_t *output) {
     memcpy(state, input, 16);
 
     for (int r = 0; r <= ctx->nr; r++) {
-        /* AddRoundKey */
         for (int i = 0; i < 4; i++) {
             uint32_t w = ctx->eK[r * 4 + i];
             state[i * 4] ^= (w >> 24);
@@ -94,27 +94,19 @@ void aes_encrypt(aes_context *ctx, const uint8_t *input, uint8_t *output) {
             state[i * 4 + 2] ^= (w >> 8) & 0xFF;
             state[i * 4 + 3] ^= w & 0xFF;
         }
-
         if (r == ctx->nr) break;
-
-        /* SubBytes */
         for (int i = 0; i < 16; i++) state[i] = sbox[state[i]];
-
-        /* ShiftRows */
         uint8_t t;
         t = state[1]; state[1] = state[5]; state[5] = state[9]; state[9] = state[13]; state[13] = t;
         t = state[2]; state[2] = state[10]; state[10] = t; t = state[6]; state[6] = state[14]; state[14] = t;
         t = state[15]; state[15] = state[11]; state[11] = state[7]; state[7] = state[3]; state[3] = t;
-
         if (r < ctx->nr - 1) mix_columns(state);
     }
     memcpy(output, state, 16);
 }
 
-/* GCM GHASH implementation */
 static void gcm_ghash(const uint8_t *h, const uint8_t *x, uint8_t *y) {
     for (int i = 0; i < 16; i++) y[i] ^= x[i];
-    // Simple bitwise GF multiplication
     uint8_t res[16] = {0};
     uint8_t v[16];
     memcpy(v, h, 16);
@@ -154,22 +146,16 @@ int gcm_encrypt(gcm_context *ctx, const uint8_t *iv, size_t iv_len,
         ctr[15]++; if (ctr[15] == 0) ctr[14]++;
         uint8_t e_ctr[16];
         aes_encrypt(&ctx->aes_ctx, ctr, e_ctr);
-
         size_t block_len = (length - i < 16) ? (length - i) : 16;
-        for (size_t j = 0; j < block_len; j++) {
-            ciphertext[i + j] = plaintext[i + j] ^ e_ctr[j];
-        }
-
+        for (size_t j = 0; j < block_len; j++) ciphertext[i + j] = plaintext[i + j] ^ e_ctr[j];
         uint8_t block[16] = {0};
         memcpy(block, ciphertext + i, block_len);
         gcm_ghash(ctx->H, block, y);
     }
-
     uint8_t len_block[16] = {0};
-    uint64_t bit_len = length * 8;
-    for (int j = 0; j < 8; j++) len_block[15 - j] = (bit_len >> (j * 8)) & 0xFF;
+    uint64_t bit_len = (uint64_t)length * 8;
+    for (int j = 0; j < 8; j++) len_block[15 - j] = (uint8_t)((bit_len >> (j * 8)) & 0xFF);
     gcm_ghash(ctx->H, len_block, y);
-
     for (int j = 0; j < 16; j++) tag[j] = y[j] ^ e_ctr0[j];
     return 0;
 }
